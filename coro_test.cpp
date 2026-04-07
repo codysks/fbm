@@ -25,16 +25,19 @@ struct SbtcpMessage {
     }
     inline SbtcpMessage& operator=(SbtcpMessage&& other) {
         message_type_ = other.message_type_;
-        copy(std::move(other.data_));
+        take(std::move(other.data_));
         return *this;
     }
     inline SbtcpMessage(SbtcpMessage&& other) {
         message_type_ = other.message_type_; // or should this be swap since this may cause a memory leak?
-        copy(std::move(other.data_));
+        take(std::move(other.data_));
     }
-    inline SbtcpMessage& copy(std::vector<unsigned char>&& other) {
+    inline SbtcpMessage& take(std::vector<unsigned char>&& other) {
         if (&(this->data_) != &other) {
             std::cerr << "data moved" << std::endl;
+            data_.~vector(); // do i need to delete this to prevent memory leak?
+                             // i dont think so because this should be dealt with
+                             // by the std::vector move assignment operator
             data_ = std::move(other); // Or should this be swap?
         }
         return *this;
@@ -188,37 +191,46 @@ start_cycle:
     // s.pop_back();
     // std::cerr << s << std::endl;
     std::cerr << "before .copy()" << std::endl;
-    data_container.copy(std::move(packet));
+    data_container.take(std::move(packet));
     std::cerr << "before co_yield()" << std::endl;
     co_yield std::move(data_container);
 
     goto start_cycle;
 }
 
-int main(int argc, char* argv[]) {
-    --argc; ++argv;
-    // auto const f = read_file(argv[0]);
-    auto f = read_file(argv[0]);
-    size_t read_count = std::stoull(argv[1], nullptr, 0);
-    if (!read_count) {
-        --read_count;
+static
+void on_sequenced_data([[maybe_unused]] std::unique_ptr<SbtcpMessage> data) {
+    std::cerr << "DEBUG: sequenced message; parse" << std::endl;
+    std::string s{"PAYLOAD:"};
+    for (auto const& c : data->data_) {
+         s += std::format("{:02x}|", (unsigned)c);
     }
+    s.pop_back();
+    std::cerr << s << std::endl;
+}
+
+void take_demo(std::string const& path, size_t max_lines) {
+    auto f = read_file(path);
     try {
-        while (read_count) {
-            --read_count;
+        while (max_lines) {
+            throw std::runtime_error("test");
+            --max_lines;
             if (!f.advance()) {
                 std::cerr << "Detected end of file" << std::endl;
                 break;
             }
             // auto next_msg = f.get();
+            // assert(f.has_value());
             // auto const dispatch = next_msg.message_type_.enumerate();
             std::cerr << "before f.take()" << std::endl;
             auto next_msg = f.take(); // take resource from the promise
             assert(!f.has_value());   // there is no more value here
             auto const dispatch = next_msg->message_type_.enumerate();
+
             switch (dispatch) {
                 case SoupbinTcp_MessageType::Enum::SequencedData:
-                    // std::cerr << "DEBUG: sequenced message; parse" << std::endl;
+                    on_sequenced_data(std::move(next_msg));
+                    assert(!next_msg);
                     break;
                 case SoupbinTcp_MessageType::Enum::EndOfSession:
                     // std::cerr << "DEBUG: no more data expected from here on out" << std::endl;
@@ -231,7 +243,23 @@ int main(int argc, char* argv[]) {
     } catch (std::exception const& excp) {
         std::cerr << excp.what() << std::endl; // goes to final suspend point
         f.~Generator();
-        exit(EXIT_FAILURE);
+        throw excp;
+    }
+}
+// void get_demo(std::string path, size_t max_lines) {
+// 
+// }
+int main(int argc, char* argv[]) {
+    --argc; ++argv;
+    // auto const f = read_file(argv[0]);
+    size_t read_count = std::stoull(argv[1], nullptr, 0);
+    if (!read_count) {
+        --read_count;
+    }
+    try {
+        take_demo(argv[0], read_count);
+    } catch (std::exception const& excp) {
+        std::cerr << "caught exception: " << excp.what() << std::endl;;
     }
     exit(EXIT_SUCCESS);
 }
