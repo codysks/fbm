@@ -20,7 +20,7 @@ struct SbtcpMessage {
     inline SbtcpMessage(SbtcpMessage const& other) { operator=(other); }
     inline SbtcpMessage& operator=(SbtcpMessage const& other) {
         message_type_ = other.message_type_;
-        data_ = data_;
+        data_ = other.data_;
         return *this;
     }
     inline SbtcpMessage& operator=(SbtcpMessage&& other) {
@@ -52,14 +52,6 @@ struct Generator {
         auto get_return_object(void) noexcept { return Generator{ *this }; }
         std::suspend_always initial_suspend(void) const noexcept { return {}; }
         std::suspend_always final_suspend(void) const noexcept { return {}; }
-        std::suspend_always yield_value([[maybe_unused]] bool a) noexcept {
-            result = std::monostate{};
-            return {};
-        }
-        std::suspend_always yield_value(void) noexcept {
-            result = std::monostate{};
-            return {};
-        }
         std::suspend_always yield_value(const T& value) noexcept(std::is_nothrow_copy_constructible_v<T>) {
             result = value;
             return {};
@@ -94,6 +86,8 @@ struct Generator {
     private:
         std::variant<std::monostate, T, std::exception_ptr> result;
     };
+    Generator(Generator const&) = delete;
+    Generator& operator=(Generator const&) = delete;
     Generator(Generator&& other) noexcept : coro{ std::exchange(other.coro, nullptr) } {}
     Generator& operator=(Generator&& other) noexcept {
         if (coro)
@@ -101,8 +95,10 @@ struct Generator {
         coro = std::exchange(other.coro, nullptr);
     }
     ~Generator(void) {
-        if (coro)
+        if (coro) {
             coro.destroy();
+            coro = nullptr;
+        }
     }
     bool has_value(void) const {
         return coro.promise().has_value();
@@ -151,7 +147,7 @@ start_cycle:
     for (size_t i = 0; i < sizeof(len_str); ++i) {
         while (true) {
             if (!read_one_char(len_str[i]))
-                co_yield false; // co_yield is equivalent to co_await promise.yield_value(expression);
+                co_await std::suspend_always{};
             else
                 break;
         }
@@ -162,7 +158,7 @@ start_cycle:
     unsigned char msgtype;
     while (true) {
         if (!read_one_char(msgtype))
-            co_yield false;
+            co_await std::suspend_always{};
         else
             break;
     }
@@ -178,7 +174,7 @@ start_cycle:
     for (size_t i = 0; i < len; ++i) {
         while (true) {
             if (!read_one_char(packet[i]))
-                co_yield false;
+                co_await std::suspend_always{};
             else
                 break;
         }
@@ -193,13 +189,23 @@ start_cycle:
     std::cerr << "before .copy()" << std::endl;
     data_container.take(std::move(packet));
     std::cerr << "before co_yield()" << std::endl;
-    co_yield std::move(data_container);
+    co_yield std::move(data_container); // co_yield is equivalent to co_await promise.yield_value(expression);
 
     goto start_cycle;
 }
 
 static
-void on_sequenced_data([[maybe_unused]] std::unique_ptr<SbtcpMessage> data) {
+void on_sequenced_data(SbtcpMessage const& data) {
+    std::cerr << "DEBUG: sequenced message; parse" << std::endl;
+    std::string s{"PAYLOAD:"};
+    for (auto const& c : data.data_) {
+         s += std::format("{:02x}|", (unsigned)c);
+    }
+    s.pop_back();
+    std::cerr << s << std::endl;
+}
+static
+void on_sequenced_data(std::unique_ptr<SbtcpMessage> data) {
     std::cerr << "DEBUG: sequenced message; parse" << std::endl;
     std::string s{"PAYLOAD:"};
     for (auto const& c : data->data_) {
@@ -213,7 +219,6 @@ void take_demo(std::string const& path, size_t max_lines) {
     auto f = read_file(path);
     try {
         while (max_lines) {
-            throw std::runtime_error("test");
             --max_lines;
             if (!f.advance()) {
                 std::cerr << "Detected end of file" << std::endl;
@@ -233,22 +238,52 @@ void take_demo(std::string const& path, size_t max_lines) {
                     assert(!next_msg);
                     break;
                 case SoupbinTcp_MessageType::Enum::EndOfSession:
-                    // std::cerr << "DEBUG: no more data expected from here on out" << std::endl;
+                    std::cerr << "DEBUG: no more data expected from here on out" << std::endl;
                     break;
                 default:
-                    // std::cerr << "DEBUG: not a sequenced message; ignore" << std::endl;
+                    std::cerr << "DEBUG: not a sequenced message; ignore" << std::endl;
                     break;
             }
         }
     } catch (std::exception const& excp) {
         std::cerr << excp.what() << std::endl; // goes to final suspend point
-        f.~Generator();
-        throw excp;
+        throw;
     }
 }
-// void get_demo(std::string path, size_t max_lines) {
-// 
-// }
+void get_demo(std::string path, size_t max_lines) {
+    auto const f = read_file(path);
+    try {
+        while (max_lines) {
+            --max_lines;
+            if (!f.advance()) {
+                std::cerr << "Detected end of file" << std::endl;
+                break;
+            }
+            auto next_msg = f.get();
+            std::cerr << "next_msg.data_.size():" << next_msg.data_.size() << std::endl;
+            assert(f.has_value());
+            auto const dispatch = next_msg.message_type_.enumerate();
+
+            switch (dispatch) {
+                case SoupbinTcp_MessageType::Enum::SequencedData:
+                    // on_sequenced_data(f.get());
+                    on_sequenced_data(next_msg);
+                    std::cerr << "DEBUG: sequenced data message" << std::endl;
+                    break;
+                case SoupbinTcp_MessageType::Enum::EndOfSession:
+                    std::cerr << "DEBUG: no more data expected from here on out" << std::endl;
+                    break;
+                default:
+                    std::cerr << "DEBUG: not a sequenced message; ignore" << std::endl;
+                    break;
+            }
+        }
+    } catch (std::exception const& excp) {
+        std::cerr << excp.what() << std::endl; // goes to final suspend point
+        throw;
+    }
+
+}
 int main(int argc, char* argv[]) {
     --argc; ++argv;
     // auto const f = read_file(argv[0]);
@@ -257,9 +292,10 @@ int main(int argc, char* argv[]) {
         --read_count;
     }
     try {
-        take_demo(argv[0], read_count);
+        get_demo(argv[0], read_count);
+        // take_demo(argv[0], read_count);
     } catch (std::exception const& excp) {
-        std::cerr << "caught exception: " << excp.what() << std::endl;;
+        // std::cerr << "caught exception: " << excp.what() << std::endl;;
     }
     exit(EXIT_SUCCESS);
 }
