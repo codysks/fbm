@@ -6,24 +6,41 @@
 #include <atomic>
 #include <coroutine>
 #include <iostream>
-#include <optional>
 #include <vector>
 #include <cassert>
 #include <cctype> 
+#include <memory>
 
 
 #include "char_enum.hpp"
 
 
 struct SbtcpMessage {
+    inline SbtcpMessage(void) = default;
+    inline SbtcpMessage(SbtcpMessage const& other) { operator=(other); }
+    inline SbtcpMessage& operator=(SbtcpMessage const& other) {
+        message_type_ = other.message_type_;
+        data_ = data_;
+        return *this;
+    }
+    inline SbtcpMessage& operator=(SbtcpMessage&& other) {
+        message_type_ = other.message_type_;
+        copy(std::move(other.data_));
+        return *this;
+    }
+    inline SbtcpMessage(SbtcpMessage&& other) {
+        message_type_ = other.message_type_; // or should this be swap since this may cause a memory leak?
+        copy(std::move(other.data_));
+    }
     inline SbtcpMessage& copy(std::vector<unsigned char>&& other) {
         if (&(this->data_) != &other) {
-            data_ = std::move(other);
+            std::cerr << "data moved" << std::endl;
+            data_ = std::move(other); // Or should this be swap?
         }
         return *this;
     }
-    SoupbinTcpMessageType message_type_;
-    std::vector<unsigned char> data_;
+    SoupbinTcpMessageType message_type_{};
+    std::vector<unsigned char> data_{};
 };
 
 template <typename T>
@@ -32,8 +49,20 @@ struct Generator {
         auto get_return_object(void) noexcept { return Generator{ *this }; }
         std::suspend_always initial_suspend(void) const noexcept { return {}; }
         std::suspend_always final_suspend(void) const noexcept { return {}; }
+        std::suspend_always yield_value([[maybe_unused]] bool a) noexcept {
+            result = std::monostate{};
+            return {};
+        }
+        std::suspend_always yield_value(void) noexcept {
+            result = std::monostate{};
+            return {};
+        }
         std::suspend_always yield_value(const T& value) noexcept(std::is_nothrow_copy_constructible_v<T>) {
             result = value;
+            return {};
+        }
+        std::suspend_always yield_value(T&& value) {
+            result = std::move(value);
             return {};
         }
         void return_void(void) const noexcept {}
@@ -45,6 +74,19 @@ struct Generator {
                 std::rethrow_exception(std::get<std::exception_ptr>(result));
             }
             return std::get<T>(result);
+        }
+        bool has_value(void) const noexcept {
+            return std::holds_alternative<T>(result);
+        }
+        void reset(void) noexcept {
+            result = std::monostate{};
+        }
+        std::unique_ptr<T> give(void) {
+            if (!has_value())
+                return nullptr;
+            auto res = std::make_unique<T>(std::move(std::get<T>(result)));
+            result = std::monostate{};
+            return res;
         }
     private:
         std::variant<std::monostate, T, std::exception_ptr> result;
@@ -59,9 +101,19 @@ struct Generator {
         if (coro)
             coro.destroy();
     }
-    auto& operator()() const {
-        coro(); // same as coro.resume()
+    bool has_value(void) const {
+        return coro.promise().has_value();
+    }
+    bool advance(void) const {
+        coro.promise().reset();
+        coro(); // same as coro.resume() : reach next suspension point and return control
+        return has_value();
+    }
+    auto const& get(void) const {
         return coro.promise().getValue();
+    }
+    std::unique_ptr<T> take(void) {
+        return coro.promise().give();
     }
 private:
     explicit Generator(promise_type& promise) noexcept :
@@ -72,10 +124,9 @@ private:
 };
 
 
-Generator<std::optional<SbtcpMessage>> read_file(std::string const& path) {
-    SbtcpMessage data_container;
-    size_t message_start_byte = 0;
-    size_t total_bytes_read = 0;
+Generator<SbtcpMessage> read_file(std::string const& path) {
+    [[maybe_unused]] size_t message_start_byte = 0;
+    [[maybe_unused]] size_t total_bytes_read = 0;
     std::ifstream ifs(path, std::ios::binary);
     if (!ifs.is_open())
         throw std::runtime_error(std::format("{}(): Could not open file {}", __func__, path));
@@ -97,7 +148,7 @@ start_cycle:
     for (size_t i = 0; i < sizeof(len_str); ++i) {
         while (true) {
             if (!read_one_char(len_str[i]))
-                co_yield {}; // co_yield is equivalent to co_await promise.yield_value(expression);
+                co_yield false; // co_yield is equivalent to co_await promise.yield_value(expression);
             else
                 break;
         }
@@ -108,10 +159,11 @@ start_cycle:
     unsigned char msgtype;
     while (true) {
         if (!read_one_char(msgtype))
-            co_yield {};
+            co_yield false;
         else
             break;
     }
+    SbtcpMessage data_container{};
     data_container.message_type_.unpack(msgtype);
     assert(len >= 1);
     --len; // Remove Sbtcp message type char
@@ -123,7 +175,7 @@ start_cycle:
     for (size_t i = 0; i < len; ++i) {
         while (true) {
             if (!read_one_char(packet[i]))
-                co_yield {};
+                co_yield false;
             else
                 break;
         }
@@ -135,15 +187,18 @@ start_cycle:
     // }
     // s.pop_back();
     // std::cerr << s << std::endl;
+    std::cerr << "before .copy()" << std::endl;
     data_container.copy(std::move(packet));
-    co_yield data_container;
+    std::cerr << "before co_yield()" << std::endl;
+    co_yield std::move(data_container);
 
     goto start_cycle;
 }
 
 int main(int argc, char* argv[]) {
     --argc; ++argv;
-    auto const f = read_file(argv[0]);
+    // auto const f = read_file(argv[0]);
+    auto f = read_file(argv[0]);
     size_t read_count = std::stoull(argv[1], nullptr, 0);
     if (!read_count) {
         --read_count;
@@ -151,18 +206,25 @@ int main(int argc, char* argv[]) {
     try {
         while (read_count) {
             --read_count;
-            auto next_msg = f();
-            if (!next_msg.has_value()) {
+            if (!f.advance()) {
                 std::cerr << "Detected end of file" << std::endl;
-                continue;
+                break;
             }
-            switch (next_msg->message_type_.enumerate()) {
-                // using Enum = SoupbinTcp_MessageType::Enum;
+            // auto next_msg = f.get();
+            // auto const dispatch = next_msg.message_type_.enumerate();
+            std::cerr << "before f.take()" << std::endl;
+            auto next_msg = f.take(); // take resource from the promise
+            assert(!f.has_value());   // there is no more value here
+            auto const dispatch = next_msg->message_type_.enumerate();
+            switch (dispatch) {
                 case SoupbinTcp_MessageType::Enum::SequencedData:
-                    std::cerr << "ok" << std::endl;
+                    // std::cerr << "DEBUG: sequenced message; parse" << std::endl;
+                    break;
+                case SoupbinTcp_MessageType::Enum::EndOfSession:
+                    // std::cerr << "DEBUG: no more data expected from here on out" << std::endl;
                     break;
                 default:
-                    std::cerr << "ng" << std::endl;
+                    // std::cerr << "DEBUG: not a sequenced message; ignore" << std::endl;
                     break;
             }
         }

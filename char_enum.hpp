@@ -12,6 +12,7 @@
 
 struct SoupbinTcp_MessageType {
     enum class Enum : char {
+        Unset = 0,
         // Sent by both
         Debug = '+',
         
@@ -29,9 +30,12 @@ struct SoupbinTcp_MessageType {
         LogoutRequest = 'O',
     };
 
+    static constexpr Enum default_value(void) noexcept { return Enum::Unset; }
+    static constexpr char underlying_value(Enum const e) { return static_cast<char>(e); }
     static constexpr std::string_view what(Enum const e) {
         using std::literals::string_view_literals::operator""sv;
         switch (e) {
+            case Enum::Unset:           return "Unset"sv;
             case Enum::Debug:           return "Debug"sv;
             case Enum::LoginAccepted:   return "LoginAccepted"sv;
             case Enum::LoginReject:     return "LoginReject"sv;
@@ -80,9 +84,9 @@ public:
         return length();
     }
     constexpr char get(void) const { return value_; }
-private:
-    char value_;
     operator std::string(void) { return std::string{{value_, }}; }
+private:
+    char value_ = EnumDefinition::underlying_value(EnumDefinition::default_value());
 };
 
 template <typename EnumDefinition>
