@@ -56,6 +56,9 @@ template <typename EnumDefinition>
 class CharEnum : public EnumDefinition {
     using Enum = EnumDefinition::Enum;
 public:
+// Constructors
+    CharEnum(void) noexcept {}
+    template <typename T> CharEnum(T const a) noexcept;
     constexpr std::string_view what(void) const { return EnumDefinition::what(enumerate()); }
     bool operator==(Enum const e) { return enumerate() == e; }
     bool operator!=(Enum const e) { return !operator==(e); }
@@ -63,7 +66,6 @@ public:
     static constexpr Enum enumerate(char const c) { return static_cast<Enum>(c); }
     static consteval size_t length(void) noexcept { return 1; }
     operator char() { return value_; }
-    CharEnum(void) {}
     template <typename T> CharEnum(T a) : value_(std::bit_cast<char>(a)) {
         static_assert(sizeof a == length());
         static_assert(std::is_integral_v<T>);
@@ -114,3 +116,5 @@ struct std::formatter<CharEnum<EnumDefinition>, char> {
 };
 
 typedef CharEnum<SoupbinTcp_MessageType> SoupbinTcpMessageType;
+
+#include "char_enum.inl.hpp"
